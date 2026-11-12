@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FraudWatch | Live Stream</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  {% include "_sidebar.html" %}
+  <main class="main" id="top">
+    {% include "_workspace_nav.html" %}
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">TRANSACTION OPERATIONS</p>
+        <h1>Live Stream</h1>
+        <p class="subheading">Dataset replay scored by the current model and decision rules.</p>
+      </div>
+      <div class="feed-controls">
+        <span class="live-pill"><i></i> DATASET REPLAY</span>
+        <button id="stream-toggle" class="feed-button" type="button">Pause feed</button>
+      </div>
+    </header>
+    <section class="notice">
+      <span class="notice-mark" aria-hidden="true">i</span>
+      <p>The first six replay rows are clearly labeled synthetic rule scenarios, followed by dataset and fraud-demo rows. Payment outcomes are simulations; this is not a live payment processor.</p>
+      <span id="stream-status" class="connection" aria-live="polite">Connecting…</span>
+    </section>
+    <section class="charts" aria-label="Live stream risk analysis">
+      <article class="panel chart-panel trend-panel">
+        <div class="panel-heading">
+          <div><p class="section-kicker">RECENT ACTIVITY</p><h2>Risk score trend</h2></div>
+          <span class="chart-unit">Probability · latest 20</span>
+        </div>
+        <div class="chart-area"><div id="risk-chart" class="trend-bars" role="img" aria-label="Risk probability trend for recent transactions"></div></div>
+      </article>
+      <article class="panel chart-panel distribution-panel">
+        <div class="panel-heading">
+          <div><p class="section-kicker">REPLAY TOTAL</p><h2>Risk distribution</h2></div>
+          <span class="chart-unit">By score level</span>
+        </div>
+        <div class="chart-area distribution-area"><div id="distribution-chart" class="distribution-bars" role="img" aria-label="Cumulative transaction counts by risk level"></div></div>
+      </article>
+    </section>
+    <section class="panel transactions-panel">
+      <div class="panel-heading table-heading">
+        <div><p class="section-kicker">SCORED REPLAY</p><h2>Transactions</h2></div>
+        <div class="history-controls">
+          <a class="feed-button report-link" href="/transaction-history">View all transaction history</a>
+          <label class="sr-only" for="stream-decision">Filter by decision</label>
+          <select id="stream-decision" class="history-select">
+            <option value="">All decisions</option>
+            <option>Approved</option>
+            <option>Challenged 3DS</option>
+            <option>Blocked</option>
+          </select>
+          <label class="sr-only" for="stream-review">Filter by investigation</label>
+          <select id="stream-review" class="history-select">
+            <option value="">All review states</option>
+            <option>Pending</option>
+            <option>In Review</option>
+            <option>Reviewed</option>
+          </select>
+          <label class="sr-only" for="stream-category">Filter by model risk</label>
+          <select id="stream-category" class="history-select">
+            <option value="">All risk levels</option>
+            <option>Low</option>
+            <option>Medium</option>
+            <option>High</option>
+          </select>
+          <label class="sr-only" for="stream-label">Filter by dataset label</label>
+          <select id="stream-label" class="history-select">
+            <option value="">All dataset labels</option>
+            <option value="1">Fraud</option>
+            <option value="0">Not fraud</option>
+          </select>
+          <label class="sr-only" for="stream-search">Search transaction ID or amount</label>
+          <input id="stream-search" class="history-search" type="search" placeholder="Search ID or amount">
+          <button id="stream-refresh" class="feed-button" type="button">Refresh</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>TRANSACTION</th><th>AMOUNT</th><th>RISK</th><th>LEVEL</th>
+            <th>DATASET LABEL</th><th>DECISION</th><th>RULE SIGNALS</th><th>WHY FLAGGED</th><th>REVIEW</th>
+          </tr></thead>
+          <tbody id="stream-transactions">
+            <tr><td colspan="9" class="empty">Loading replayed transactions…</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="table-foot">
+        <span id="stream-count" aria-live="polite">Loading…</span>
+        <button id="stream-more" class="feed-button" type="button" hidden>Load more</button>
+      </div>
+    </section>
+    <footer class="page-footer">The source CSV contains transaction features and fraud labels; decision outcomes are local policy simulations.</footer>
+  </main>
+  <script>
+    document.addEventListener("DOMContentLoaded", () => {
+      const body = document.getElementById("stream-transactions");
+      const params = new URLSearchParams(location.search);
+      const decision = document.getElementById("stream-decision");
+      const review = document.getElementById("stream-review");
+      const category = document.getElementById("stream-category");
+      const datasetLabel = document.getElementById("stream-label");
+      const search = document.getElementById("stream-search");
+      const status = document.getElementById("stream-status");
+      const count = document.getElementById("stream-count");
+      const more = document.getElementById("stream-more");
+      let transactions = [];
+      let offset = 0;
+      let total = 0;
+      let paused = false;
+      let timer;
+      let loading = false;
+      decision.value = params.get("decision") || "";
+      review.value = params.get("investigation_status") || "";
+      category.value = params.get("category") || "";
+      datasetLabel.value = params.get("dataset_label") || "";
+      search.value = params.get("search") || "";
+
+      const escapeHtml = value => String(value).replace(/[&<>"']/g, character => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;"
+      })[character]);
+
+      function updateCharts(items, counts) {
+        const chronological = [...items].reverse();
+        document.getElementById("risk-chart").innerHTML = chronological.map(transaction => {
+          const risk = Math.min(Math.max(Number(transaction.risk), 0), 100);
+          return `<span class="trend-bar" title="${escapeHtml(transaction.id)}: ${risk.toFixed(1)}% risk" style="height:${Math.max(risk, 2)}%"></span>`;
+        }).join("");
+
+        const total = Math.max(counts.High + counts.Medium + counts.Low, 1);
+        document.getElementById("distribution-chart").innerHTML = ["High", "Medium", "Low"].map(level => {
+          const amount = counts[level];
+          const width = amount / total * 100;
+          return `<div class="distribution-row ${level.toLowerCase()}">
+            <span>${level}</span><span class="distribution-track"><span style="width:${width}%"></span></span><strong>${amount}</strong>
+          </div>`;
+        }).join("");
+      }
+
+      function render(items) {
+        if (!items.length) {
+          body.innerHTML = '<tr><td colspan="9" class="empty">No transactions match these filters yet.</td></tr>';
+          return;
+        }
+        body.innerHTML = items.map(item => {
+          const level = escapeHtml(item.category.toLowerCase());
+          const outcome = item.decision_status || "Pending";
+          const outcomeClass = escapeHtml(outcome.toLowerCase().replace(/\s+/g, "-"));
+          const datasetLabel = item.original_dataset_label === null
+            ? item.scenario_name ? "Synthetic scenario" : "Synthetic demo"
+            : Number(item.original_dataset_label) === 1 ? "Fraud" : "Not fraud";
+          const reasons = [
+            item.scenario_name ? `<strong>${escapeHtml(item.scenario_name)}</strong><br>` : "",
+            item.reasons.map(escapeHtml).join("<br>")
+          ].join("");
+          const ruleEvaluations = (item.rule_evaluations || []).map(result =>
+            `<span class="rule-result ${escapeHtml(result.status)}">${escapeHtml(result.rule_id)}: ${escapeHtml(result.status.replace(/_/g, " "))}</span><small>${escapeHtml(result.detail)}</small>`
+          ).join("<br>") || "No rule evaluation stored";
+          return `<tr>
+            <td class="tx-id">${escapeHtml(item.id)}</td>
+            <td class="amount">$${Number(item.amount).toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
+            <td><div class="risk-value">${Number(item.risk).toFixed(1)}%</div><div class="track"><div class="fill ${level}" style="width:${Math.min(Math.max(Number(item.risk), 0), 100)}%"></div></div></td>
+            <td><span class="badge ${level}">${escapeHtml(item.category)}</span></td>
+            <td><span class="dataset-label ${datasetLabel === "Fraud" ? "fraud-label" : ""}">${escapeHtml(datasetLabel)}</span></td>
+            <td><span class="decision-badge ${outcomeClass}">${escapeHtml(outcome)}</span></td>
+            <td class="rule-results">${ruleEvaluations}</td>
+            <td class="reason">${reasons}</td>
+            <td>${escapeHtml(item.investigation_status)}</td>
+          </tr>`;
+        }).join("");
+      }
+
+      async function load(reset = true) {
+        if (loading) return;
+        loading = true;
+        try {
+          if (!paused && reset) {
+            const streamResponse = await fetch("/api/stream", {cache: "no-store"});
+            if (!streamResponse.ok) throw new Error(`Replay request failed (${streamResponse.status})`);
+            const summaryResponse = await fetch("/api/summary", {cache: "no-store"});
+            if (!summaryResponse.ok) throw new Error(`Summary request failed (${summaryResponse.status})`);
+            const summary = await summaryResponse.json();
+            updateCharts(summary.transactions, summary.counts);
+          }
+          if (reset) {
+            offset = 0;
+            transactions = [];
+          }
+          const query = new URLSearchParams({
+            offset: String(offset),
+            limit: "25",
+            decision: decision.value,
+            investigation_status: review.value,
+            category: category.value,
+            dataset_label: datasetLabel.value,
+            search: search.value.trim()
+          });
+          const response = await fetch(`/api/history?${query}`, {cache: "no-store"});
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || `History request failed (${response.status})`);
+          total = data.total;
+          offset += data.transactions.length;
+          transactions.push(...data.transactions);
+          render(transactions);
+          count.textContent = `Showing ${Math.min(offset, total)} of ${total} matching replayed transactions`;
+          more.hidden = offset >= total;
+          status.textContent = paused ? "Feed paused" : "Dataset replay connected";
+        } catch (error) {
+          status.textContent = "Connection issue";
+          count.textContent = error.message;
+          console.error("Live stream update failed:", error);
+        } finally {
+          loading = false;
+        }
+      }
+
+      document.getElementById("stream-toggle").addEventListener("click", event => {
+        paused = !paused;
+        event.currentTarget.textContent = paused ? "Resume feed" : "Pause feed";
+        status.textContent = paused ? "Feed paused" : "Dataset replay connected";
+        if (!paused) load();
+      });
+      document.getElementById("stream-refresh").addEventListener("click", () => load());
+      more.addEventListener("click", () => load(false));
+      for (const filter of [decision, review, category, datasetLabel]) filter.addEventListener("change", () => load());
+      let searchTimer;
+      search.addEventListener("input", () => {
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(() => load(), 250);
+      });
+      load();
+      timer = setInterval(() => load(), 2500);
+      window.addEventListener("pagehide", () => clearInterval(timer));
+    });
+  </script>
+</body>
+</html>

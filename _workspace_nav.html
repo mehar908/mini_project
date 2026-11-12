@@ -1,0 +1,6 @@
+<nav class="workspace-nav" aria-label="Fraud operations pages">
+  {% for page_key, label, href in workspace_nav_items %}
+  <a class="workspace-nav-link{% if active_page == page_key %} active{% endif %}"
+     href="{{ href }}"{% if active_page == page_key %} aria-current="page"{% endif %}>{{ label }}</a>
+  {% endfor %}
+</nav>

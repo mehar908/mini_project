@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FraudWatch | Disputes SLA</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  {% include "_sidebar.html" %}
+  <main class="main workspace-content">
+    {% include "_workspace_nav.html" %}
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">REVIEW OPERATIONS</p>
+        <h1>Disputes SLA</h1>
+        <p class="subheading">Track review timing for dataset-labeled fraud transactions.</p>
+      </div>
+      <button id="sla-refresh" class="feed-button" type="button">Refresh queue</button>
+    </header>
+    <section class="notice">
+      <span class="notice-mark" aria-hidden="true">i</span>
+      <p id="sla-note">This is an illustrative review queue based on CSV fraud labels, not real customer disputes or chargebacks.</p>
+    </section>
+    <section class="metrics" aria-label="Review SLA metrics">
+      <article class="metric total-metric"><div class="metric-head"><span>LABELED FRAUD IN REPLAY</span><span class="metric-dot"></span></div><strong id="sla-total">0</strong><small>Dataset-labeled examples seen by the replay</small></article>
+      <article class="metric legit-metric"><div class="metric-head"><span>REVIEWED</span><span class="metric-dot"></span></div><strong id="sla-reviewed">0</strong><small>Marked Reviewed in investigation history</small></article>
+      <article class="metric high-metric"><div class="metric-head"><span>OPEN REVIEW</span><span class="metric-dot"></span></div><strong id="sla-open">0</strong><small>Illustrative target: <span id="sla-hours">4</span> hours from replay</small></article>
+    </section>
+    <section class="panel transactions-panel">
+      <div class="panel-heading table-heading"><div><p class="section-kicker">LATEST QUEUE ITEMS</p><h2>Review timing</h2></div></div>
+      <div class="table-wrap">
+        <table class="compact-table">
+          <thead><tr><th>TRANSACTION</th><th>AMOUNT</th><th>RISK</th><th>DECISION</th><th>REVIEW STATUS</th><th>AGE</th><th>SLA</th></tr></thead>
+          <tbody id="sla-transactions"><tr><td colspan="7" class="empty">Loading review queue…</td></tr></tbody>
+        </table>
+      </div>
+      <div class="table-foot"><span id="sla-status" aria-live="polite">Loading…</span><a href="/live-stream?investigation_status=In%20Review">Open in transaction stream</a></div>
+    </section>
+  </main>
+  <script>
+    document.addEventListener("DOMContentLoaded", () => {
+      const body = document.getElementById("sla-transactions");
+      async function loadQueue() {
+        const response = await fetch("/api/disputes-sla", {cache: "no-store"});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `Queue request failed (${response.status})`);
+        document.getElementById("sla-total").textContent = data.total;
+        document.getElementById("sla-reviewed").textContent = data.reviewed;
+        document.getElementById("sla-open").textContent = data.open;
+        document.getElementById("sla-hours").textContent = data.sla_hours;
+        document.getElementById("sla-note").textContent = data.note;
+        body.replaceChildren();
+        for (const item of data.transactions) {
+          const row = document.createElement("tr");
+          const cells = [
+            item.id,
+            `$${Number(item.amount).toFixed(2)}`,
+            `${item.risk.toFixed(1)}%`,
+            item.decision,
+            item.investigation_status,
+            `${item.age_hours.toFixed(2)} h`,
+            item.investigation_status === "Reviewed" ? "Complete" : item.sla_breached ? "Breached" : `${item.sla_remaining_hours.toFixed(2)} h left`
+          ];
+          for (const [index, value] of cells.entries()) {
+            const cell = document.createElement(index === 0 ? "th" : "td");
+            if (index === 0) cell.scope = "row";
+            cell.textContent = value;
+            if (index === 6) cell.className = item.sla_breached ? "sla-breached" : "sla-ok";
+            row.append(cell);
+          }
+          body.append(row);
+        }
+        if (!data.transactions.length) {
+          body.innerHTML = '<tr><td colspan="7" class="empty">No dataset-labeled fraud transactions have reached the replay yet.</td></tr>';
+        }
+        document.getElementById("sla-status").textContent = `Showing ${data.transactions.length} latest items`;
+      }
+      document.getElementById("sla-refresh").addEventListener("click", () => loadQueue().catch(showError));
+      function showError(error) {
+        document.getElementById("sla-status").textContent = error.message;
+      }
+      loadQueue().catch(showError);
+      setInterval(() => loadQueue().catch(showError), 10000);
+    });
+  </script>
+</body>
+</html>

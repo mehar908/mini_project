@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FraudWatch | AI SyndicateHunter</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  {% include "_sidebar.html" %}
+  <main class="main workspace-content">
+    {% include "_workspace_nav.html" %}
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">EXPLAINABLE PATTERN EXPLORER</p>
+        <h1>AI SyndicateHunter</h1>
+        <p class="subheading">Explore repeated risk signals among replayed high-risk or labeled-fraud transactions.</p>
+      </div>
+      <button id="signals-refresh" class="feed-button" type="button">Refresh signals</button>
+    </header>
+    <section class="notice">
+      <span class="notice-mark" aria-hidden="true">i</span>
+      <p id="signals-note">Loading data limitations…</p>
+    </section>
+    <section class="panel workspace-panel syndicate-match-panel">
+      <div class="panel-heading">
+        <div><p class="section-kicker">SIGNAL COMPARISON</p><h2>Check Transaction Against Syndicates</h2></div>
+      </div>
+      <p class="methodology-copy">Compare a recorded transaction or enter top explanation features and their contribution percentages.</p>
+      <form id="syndicate-match-form" class="workspace-form syndicate-match-form">
+        <label>
+          Transaction ID
+          <input id="match-transaction-id" type="text" maxlength="100" placeholder="e.g. TX-0001179">
+        </label>
+        <span class="syndicate-or">or</span>
+        <label class="syndicate-feature-input">
+          Top features and contribution %
+          <textarea id="match-features" rows="3" placeholder="V17: 91%, V14: 86%"></textarea>
+        </label>
+        <button class="feed-button primary-button" type="submit">Match against known signals</button>
+      </form>
+      <p class="syndicate-match-note">This is pattern matching on model explanations only – not confirmed linked accounts.</p>
+      <p id="syndicate-match-status" class="workspace-message" aria-live="polite"></p>
+      <section id="syndicate-match-results" class="syndicate-match-results" aria-live="polite" hidden>
+        <div class="syndicate-score-card">
+          <span>Overall match score</span>
+          <strong id="syndicate-match-score">0%</strong>
+          <span id="syndicate-risk-level" class="syndicate-risk-level">Low risk</span>
+        </div>
+        <div class="syndicate-result-content">
+          <h3>Matched signal groups</h3>
+          <div id="syndicate-matched-groups" class="matched-signal-list"></div>
+          <h3>Historical transactions sharing these signals</h3>
+          <ul id="syndicate-overlapping-transactions" class="overlapping-transaction-list"></ul>
+          <p id="syndicate-explanation" class="methodology-copy"></p>
+        </div>
+      </section>
+    </section>
+    <section class="panel workspace-panel">
+      <div class="panel-heading"><div><p class="section-kicker">REPLAYED RECORDS</p><h2>Repeated model explanation signals</h2></div></div>
+      <p id="signals-count" class="workspace-message">Loading signal groups…</p>
+      <div id="signal-groups" class="signal-grid"></div>
+    </section>
+    <footer class="page-footer">This prototype clusters explanation features, not people or payment networks. Review the underlying transactions before acting.</footer>
+  </main>
+  <script>
+    document.addEventListener("DOMContentLoaded", () => {
+      const groups = document.getElementById("signal-groups");
+      const matchForm = document.getElementById("syndicate-match-form");
+
+      function parseFeatures(value) {
+        return value.split(/[,\n]+/).map(entry => entry.trim()).filter(Boolean).map(entry => {
+          const match = entry.match(/^([^:]+):\s*(\d+(?:\.\d+)?)\s*%?$/);
+          if (!match) throw new Error(`Use “feature: contribution%” format for "${entry}".`);
+          return {feature: match[1].trim(), contribution: Number(match[2])};
+        });
+      }
+
+      function addText(parent, tag, text, className) {
+        const element = document.createElement(tag);
+        element.textContent = text;
+        if (className) element.className = className;
+        parent.append(element);
+        return element;
+      }
+
+      function renderMatchResult(data) {
+        document.getElementById("syndicate-match-results").hidden = false;
+        document.getElementById("syndicate-match-score").textContent = `${data.match_score}%`;
+        const risk = document.getElementById("syndicate-risk-level");
+        risk.textContent = `${data.risk_level} risk`;
+        risk.className = `syndicate-risk-level risk-${data.risk_level.toLowerCase()}`;
+
+        const matchedGroups = document.getElementById("syndicate-matched-groups");
+        matchedGroups.replaceChildren();
+        if (data.matched_groups.length) {
+          for (const group of data.matched_groups) {
+            addText(matchedGroups, "span", `${group.signal} · ${group.count} transactions · ${group.contribution}% weight`, "matched-signal-chip");
+          }
+        } else {
+          addText(matchedGroups, "span", "No repeated signal groups matched.", "workspace-message");
+        }
+
+        const transactions = document.getElementById("syndicate-overlapping-transactions");
+        transactions.replaceChildren();
+        if (data.overlapping_txs.length) {
+          for (const transaction of data.overlapping_txs) {
+            const item = document.createElement("li");
+            const link = document.createElement("a");
+            link.href = `/live-stream?search=${encodeURIComponent(transaction.id)}`;
+            link.textContent = `${transaction.id} · ${transaction.risk.toFixed(1)}% risk · ${transaction.signals.join(", ")}`;
+            item.append(link);
+            transactions.append(item);
+          }
+        } else {
+          addText(transactions, "li", "No other recorded transactions share the matched signals.");
+        }
+        document.getElementById("syndicate-explanation").textContent = data.explanation;
+      }
+
+      matchForm.addEventListener("submit", async event => {
+        event.preventDefault();
+        const status = document.getElementById("syndicate-match-status");
+        const transactionId = document.getElementById("match-transaction-id").value.trim();
+        const featureText = document.getElementById("match-features").value.trim();
+        const results = document.getElementById("syndicate-match-results");
+        results.hidden = true;
+        status.textContent = "";
+        let payload;
+        try {
+          if (Boolean(transactionId) === Boolean(featureText)) {
+            throw new Error("Provide either a transaction ID or a feature list, not both.");
+          }
+          payload = transactionId
+            ? {transaction_id: transactionId}
+            : {features: parseFeatures(featureText)};
+          const response = await fetch("/api/v1/syndicate/match", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify(payload)
+          });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || `Match request failed (${response.status})`);
+          renderMatchResult(data);
+          status.textContent = "Signal matching complete.";
+        } catch (error) {
+          status.textContent = error.message;
+          console.error("Syndicate signal match failed:", error);
+        }
+      });
+
+      async function loadSignals() {
+        const response = await fetch("/api/ai-syndicatehunter", {cache: "no-store"});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `Signal request failed (${response.status})`);
+        document.getElementById("signals-note").textContent = data.note;
+        document.getElementById("signals-count").textContent = `${data.transactions_analyzed} replayed high-risk or dataset-labeled fraud transactions analyzed`;
+        groups.replaceChildren();
+        for (const group of data.groups) {
+          const article = document.createElement("article");
+          article.className = "signal-card";
+          const heading = document.createElement("h3");
+          heading.textContent = group.signal;
+          const total = document.createElement("strong");
+          total.textContent = `${group.count} signal hits`;
+          article.append(heading, total);
+          const list = document.createElement("ul");
+          for (const transaction of group.transactions) {
+            const item = document.createElement("li");
+            const link = document.createElement("a");
+            link.href = `/live-stream?search=${encodeURIComponent(transaction.id)}`;
+            link.textContent = `${transaction.id} · ${transaction.risk.toFixed(1)}%`;
+            item.append(link);
+            list.append(item);
+          }
+          article.append(list);
+          groups.append(article);
+        }
+        if (!data.groups.length) {
+          groups.textContent = "No repeated risk explanation signals yet. Let the dataset replay process more transactions.";
+        }
+      }
+      function showError(error) {
+        document.getElementById("signals-count").textContent = error.message;
+      }
+      document.getElementById("signals-refresh").addEventListener("click", () => loadSignals().catch(showError));
+      loadSignals().catch(showError);
+      setInterval(() => loadSignals().catch(showError), 10000);
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#172b2a">
+  <title>FraudWatch | Methodology</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  {% include "_sidebar.html" %}
+  <main class="main">
+    {% include "_workspace_nav.html" %}
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">PROJECT DOCUMENTATION</p>
+        <h1>Methodology</h1>
+        <p class="subheading">How data is prepared, models are evaluated, and risk scores are produced.</p>
+      </div>
+      <div class="feed-controls">
+        <a class="feed-button report-link" href="/reports/csv">Download CSV report</a>
+        <a class="feed-button report-link" href="/reports/pdf">Download PDF report</a>
+      </div>
+    </header>
+    <section class="panel methodology-panel">
+      {% for heading, description in methodology %}
+      <article class="methodology-item">
+        <h2>{{ heading }}</h2>
+        <p>{{ description }}</p>
+      </article>
+      {% endfor %}
+      <article class="methodology-item">
+        <h2>System limitations</h2>
+        <ul>{% for item in limitations %}<li>{{ item }}</li>{% endfor %}</ul>
+      </article>
+      <article class="methodology-item">
+        <h2>Future improvements</h2>
+        <ul>{% for item in future_improvements %}<li>{{ item }}</li>{% endfor %}</ul>
+      </article>
+      <div class="table-foot">
+        <p>Model estimates support review and are not proof of fraud or a substitute for a human investigation.</p>
+        <a href="/">Return to dashboard</a>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

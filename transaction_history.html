@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#172b2a">
+  <title>FraudWatch | Transaction history</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  {% include "_sidebar.html" %}
+  <main class="main" id="top">
+    {% include "_workspace_nav.html" %}
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">TRANSACTION OPERATIONS</p>
+        <h1>Transaction history</h1>
+        <p class="subheading">Search all transactions recorded during dataset replay, inspect risk signals, and save investigations.</p>
+      </div>
+      <div class="feed-controls">
+        <a class="feed-button report-link" href="/live-stream">Back to Live Stream</a>
+      </div>
+    </header>
+    <section class="panel transactions-panel">
+      <div class="panel-heading table-heading">
+        <div><p class="section-kicker">SESSION RECORD</p><h2>Recorded transactions</h2></div>
+        <div class="history-controls">
+          <label class="sr-only" for="history-risk-filter">Filter by risk category</label>
+          <select id="history-risk-filter" class="history-select">
+            <option value="">All risk levels</option>
+            <option>High</option>
+            <option>Medium</option>
+            <option>Low</option>
+          </select>
+          <label class="sr-only" for="history-decision-filter">Filter by decision</label>
+          <select id="history-decision-filter" class="history-select">
+            <option value="">All decisions</option>
+            <option>Approved</option>
+            <option>Blocked</option>
+            <option>Challenged 3DS</option>
+          </select>
+          <label class="sr-only" for="history-review-filter">Filter by investigation status</label>
+          <select id="history-review-filter" class="history-select">
+            <option value="">All review states</option>
+            <option>Pending</option>
+            <option>In Review</option>
+            <option>Reviewed</option>
+          </select>
+          <label class="sr-only" for="history-label-filter">Filter by dataset label</label>
+          <select id="history-label-filter" class="history-select">
+            <option value="">All dataset labels</option>
+            <option value="1">Fraud</option>
+            <option value="0">Not fraud</option>
+          </select>
+          <label class="sr-only" for="history-search">Search transaction ID or amount</label>
+          <input id="history-search" class="history-search" type="search" placeholder="Search ID or amount">
+          <button id="history-refresh" class="feed-button" type="button">Refresh</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th scope="col">TRANSACTION</th><th scope="col">TIMESTAMP</th><th scope="col">AMOUNT</th>
+            <th scope="col">RISK</th><th scope="col">LABEL</th><th scope="col">DECISION</th>
+            <th scope="col">REVIEW</th><th scope="col">FLAG</th><th scope="col">INSPECT</th>
+          </tr></thead>
+          <tbody id="history-transactions" aria-live="polite">
+            <tr><td colspan="9" class="empty">Loading transaction history…</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="table-foot">
+        <span id="history-status" aria-live="polite">Loading…</span>
+        <button id="history-more" class="feed-button" type="button" hidden>Load more</button>
+      </div>
+    </section>
+    <footer class="page-footer">History includes transactions persisted by dataset replay; it is separate from the complete source CSV row count.</footer>
+  </main>
+  <dialog id="transaction-inspector" class="transaction-inspector">
+    <form method="dialog" class="inspector-header">
+      <div><p class="section-kicker">TRANSACTION INSPECTOR</p><h2 id="inspector-title">Transaction details</h2></div>
+      <button class="feed-button" aria-label="Close transaction inspector">Close</button>
+    </form>
+    <div id="inspector-details" class="inspector-details"></div>
+    <section class="inspector-review" aria-labelledby="inspector-review-title">
+      <h3 id="inspector-review-title">Investigation</h3>
+      <label for="inspector-status">Review status</label>
+      <select id="inspector-status" class="history-select">
+        <option>Pending</option>
+        <option>In Review</option>
+        <option>Reviewed</option>
+      </select>
+      <label for="inspector-notes">Investigator notes</label>
+      <textarea id="inspector-notes" maxlength="2000" rows="4" placeholder="Add notes for this transaction"></textarea>
+      <div class="inspector-actions">
+        <span id="inspector-save-status" aria-live="polite"></span>
+        <button id="inspector-save" class="feed-button" type="button">Save review</button>
+      </div>
+    </section>
+  </dialog>
+  <script>
+    document.addEventListener("DOMContentLoaded", () => {
+      const body = document.getElementById("history-transactions");
+      const status = document.getElementById("history-status");
+      const more = document.getElementById("history-more");
+      const dialog = document.getElementById("transaction-inspector");
+      const details = document.getElementById("inspector-details");
+      const historyItems = [];
+      let offset = 0;
+      let total = 0;
+      let loading = false;
+      let searchTimer;
+      let inspectedTransaction = null;
+
+      const filters = {
+        category: document.getElementById("history-risk-filter"),
+        decision: document.getElementById("history-decision-filter"),
+        investigation_status: document.getElementById("history-review-filter"),
+        dataset_label: document.getElementById("history-label-filter"),
+        search: document.getElementById("history-search")
+      };
+
+      function getFlaggedTransactions() {
+        try {
+          const items = JSON.parse(localStorage.getItem("fraudwatch-flagged-transactions") || "[]");
+          return Array.isArray(items) ? items.filter(item => item && item.id) : [];
+        } catch (error) {
+          console.error("Could not read saved transaction flags:", error);
+          return [];
+        }
+      }
+
+      function render() {
+        if (!historyItems.length) {
+          body.innerHTML = '<tr><td colspan="9" class="empty">No transactions match these filters.</td></tr>';
+          return;
+        }
+        const flaggedIds = new Set(getFlaggedTransactions().map(item => item.id));
+        body.innerHTML = historyItems.map((item, index) => {
+          const level = String(item.category).toLowerCase();
+          const label = item.original_dataset_label === null
+            ? item.scenario_name ? "Synthetic scenario" : "Synthetic demo"
+            : Number(item.original_dataset_label) === 1 ? "Fraud" : "Not fraud";
+          const decision = item.decision_status || "Pending";
+          const decisionClass = decision.toLowerCase().replace(/\s+/g, "-");
+          const flagged = flaggedIds.has(item.id);
+          const timestamp = item.timestamp ? new Date(item.timestamp).toLocaleString() : "—";
+          return `<tr>
+            <td class="tx-id">${escapeHtml(item.id)}</td>
+            <td>${escapeHtml(timestamp)}</td>
+            <td class="amount">$${Number(item.amount).toLocaleString("en-US", {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td>
+            <td><div class="risk-value">${Number(item.risk).toFixed(1)}%</div><div class="track"><div class="fill ${escapeHtml(level)}" style="width:${Math.min(Math.max(Number(item.risk), 0), 100)}%"></div></div></td>
+            <td><span class="dataset-label ${label === "Fraud" ? "fraud-label" : ""}">${escapeHtml(label)}</span></td>
+            <td><span class="decision-badge ${escapeHtml(decisionClass)}">${escapeHtml(decision)}</span></td>
+            <td>${escapeHtml(item.investigation_status || "Pending")}</td>
+            <td class="action-cell"><button class="flag-button${flagged ? " is-flagged" : ""}" type="button" data-flag-index="${index}" aria-label="${flagged ? "Remove flag from" : "Flag"} ${escapeHtml(item.id)}" aria-pressed="${flagged}" title="${flagged ? "Remove flag" : "Flag for later"}">${flagged ? "★" : "☆"}</button></td>
+            <td><button class="feed-button" type="button" data-inspect-index="${index}">Inspect</button></td>
+          </tr>`;
+        }).join("");
+      }
+
+      function escapeHtml(value) {
+        return String(value).replace(/[&<>"']/g, character => ({
+          "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;"
+        })[character]);
+      }
+
+      async function load(reset = false) {
+        if (loading) return;
+        loading = true;
+        more.disabled = true;
+        if (reset) {
+          historyItems.length = 0;
+          offset = 0;
+        }
+        try {
+          const params = new URLSearchParams({
+            offset: String(offset),
+            limit: "100",
+            category: filters.category.value,
+            decision: filters.decision.value,
+            investigation_status: filters.investigation_status.value,
+            dataset_label: filters.dataset_label.value,
+            search: filters.search.value.trim()
+          });
+          const response = await fetch(`/api/history?${params}`, {cache: "no-store"});
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.error || `History request failed (${response.status})`);
+          historyItems.push(...result.transactions);
+          offset += result.transactions.length;
+          total = result.total;
+          render();
+          status.textContent = `Showing ${historyItems.length} of ${total} recorded transactions`;
+          more.hidden = offset >= total;
+        } catch (error) {
+          status.textContent = "Could not load transaction history";
+          console.error("Transaction history request failed:", error);
+        } finally {
+          loading = false;
+          more.disabled = false;
+        }
+      }
+
+      function addDetail(label, value) {
+        const item = document.createElement("div");
+        item.className = "inspector-detail";
+        const heading = document.createElement("strong");
+        heading.textContent = label;
+        const content = document.createElement("pre");
+        content.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+        item.append(heading, content);
+        details.append(item);
+      }
+
+      function inspect(item) {
+        inspectedTransaction = item;
+        document.getElementById("inspector-title").textContent = `Transaction ${item.id}`;
+        document.getElementById("inspector-status").value = item.investigation_status || "Pending";
+        document.getElementById("inspector-notes").value = item.investigator_notes || "";
+        document.getElementById("inspector-save-status").textContent = "";
+        details.replaceChildren();
+        const label = item.original_dataset_label === null
+          ? item.scenario_name ? "Synthetic scenario" : "Synthetic demo"
+          : Number(item.original_dataset_label) === 1 ? "Fraud" : "Not fraud";
+        addDetail("Timestamp", item.timestamp || "—");
+        addDetail("Amount", `$${Number(item.amount).toFixed(2)}`);
+        addDetail("Dataset label", label);
+        addDetail("Risk", `${Number(item.risk).toFixed(1)}% (${item.category})`);
+        addDetail("Decision", item.decision_status || "Pending");
+        addDetail("Risk signals", item.reasons || []);
+        addDetail("Rule evaluations", item.rule_evaluations || []);
+        addDetail("Explanation", item.explanation_note || "No additional explanation recorded.");
+        dialog.showModal();
+      }
+
+      body.addEventListener("click", event => {
+        const flagButton = event.target.closest("[data-flag-index]");
+        if (flagButton) {
+          const item = historyItems[Number(flagButton.dataset.flagIndex)];
+          if (!item) return;
+          const flagged = getFlaggedTransactions();
+          const existingIndex = flagged.findIndex(saved => saved.id === item.id);
+          if (existingIndex >= 0) flagged.splice(existingIndex, 1);
+          else flagged.push(item);
+          localStorage.setItem("fraudwatch-flagged-transactions", JSON.stringify(flagged));
+          render();
+          return;
+        }
+        const inspectButton = event.target.closest("[data-inspect-index]");
+        if (inspectButton) {
+          const item = historyItems[Number(inspectButton.dataset.inspectIndex)];
+          if (item) inspect(item);
+        }
+      });
+
+      document.getElementById("inspector-save").addEventListener("click", async event => {
+        if (!inspectedTransaction) return;
+        const button = event.currentTarget;
+        button.disabled = true;
+        try {
+          const response = await fetch(`/api/transactions/${encodeURIComponent(inspectedTransaction.id)}/investigation`, {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({
+              review_status: document.getElementById("inspector-status").value,
+              investigator_notes: document.getElementById("inspector-notes").value
+            })
+          });
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.error || `Review update failed (${response.status})`);
+          inspectedTransaction.investigation_status = result.review_status;
+          inspectedTransaction.investigator_notes = result.investigator_notes;
+          document.getElementById("inspector-save-status").textContent = "Review saved";
+          render();
+        } catch (error) {
+          document.getElementById("inspector-save-status").textContent = error.message;
+          console.error("Investigation update failed:", error);
+        } finally {
+          button.disabled = false;
+        }
+      });
+
+      more.addEventListener("click", () => load());
+      document.getElementById("history-refresh").addEventListener("click", () => load(true));
+      for (const filter of [filters.category, filters.decision, filters.investigation_status, filters.dataset_label]) {
+        filter.addEventListener("change", () => load(true));
+      }
+      filters.search.addEventListener("input", () => {
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(() => load(true), 250);
+      });
+      load(true);
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FraudWatch | Decision Rules</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  {% include "_sidebar.html" %}
+  <main class="main workspace-content">
+    {% include "_workspace_nav.html" %}
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">POLICY CONFIGURATION</p>
+        <h1>Decision Rules</h1>
+        <p class="subheading">Set score bands used by the replay, dashboard counters, and sandbox.</p>
+      </div>
+    </header>
+    <section class="notice">
+      <span class="notice-mark" aria-hidden="true">i</span>
+      <p>These are demo rules only. Saving them recalculates decisions for transactions already in the local replay database.</p>
+    </section>
+    <section class="panel workspace-panel">
+      <div class="panel-heading"><div><p class="section-kicker">HYBRID RISK POLICY</p><h2>Decision thresholds</h2></div></div>
+      <form id="rules-form" class="workspace-form">
+        <label>Approve below (% risk)
+          <input id="approve-max" name="approve_max" type="number" min="0" max="99.9" step="0.1" required>
+        </label>
+        <label>Block at or above (% risk)
+          <input id="challenge-max" name="challenge_max" type="number" min="0.1" max="100" step="0.1" required>
+        </label>
+        <button class="feed-button primary-button" type="submit">Save and apply rules</button>
+      </form>
+      <p id="rules-message" class="workspace-message" role="status"></p>
+      <div class="table-wrap">
+        <table class="compact-table">
+          <thead><tr><th>OUTCOME</th><th>RULE</th></tr></thead>
+          <tbody id="rules-list"><tr><td colspan="2" class="empty">Loading rules…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+    <section class="panel workspace-panel">
+      <div class="panel-heading">
+        <div><p class="section-kicker">SUPPLEMENTARY FRAUD SIGNALS</p><h2>Dataset-aware rules</h2></div>
+      </div>
+      <p id="fraud-rule-note" class="workspace-message">Loading rule data coverage…</p>
+      <div id="fraud-rule-cards" class="fraud-rule-grid"></div>
+    </section>
+    <section class="panel workspace-panel">
+      <div class="panel-heading"><div><p class="section-kicker">OUTCOME DEFINITIONS</p><h2>How the replay uses each status</h2></div></div>
+      <ul class="feature-list">
+        <li><strong>Approved:</strong> score below the approval threshold.</li>
+        <li><strong>Challenged 3DS:</strong> score between the approval and block thresholds.</li>
+        <li><strong>Blocked:</strong> score at or above the block threshold.</li>
+        <li><strong>In Review:</strong> a separate manual investigation status; it can coexist with a simulated decision.</li>
+      </ul>
+    </section>
+    <footer class="page-footer">Rules are stored in the project's SQLite database and apply only to this demonstration app.</footer>
+  </main>
+  <script>
+    document.addEventListener("DOMContentLoaded", () => {
+      const form = document.getElementById("rules-form");
+      const message = document.getElementById("rules-message");
+      const rulesList = document.getElementById("rules-list");
+      const fraudRuleCards = document.getElementById("fraud-rule-cards");
+      async function loadRules() {
+        const response = await fetch("/api/rules", {cache: "no-store"});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `Could not load rules (${response.status})`);
+        document.getElementById("approve-max").value = data.policy.approve_max;
+        document.getElementById("challenge-max").value = data.policy.challenge_max;
+        rulesList.replaceChildren();
+        for (const rule of data.rules) {
+          const row = document.createElement("tr");
+          const outcome = document.createElement("th");
+          outcome.scope = "row";
+          outcome.textContent = rule.outcome;
+          const condition = document.createElement("td");
+          condition.textContent = rule.condition;
+          row.append(outcome, condition);
+          rulesList.append(row);
+        }
+      }
+      async function loadFraudRules() {
+          const response = await fetch("/api/fraud-rules", {cache: "no-store"});
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || `Could not load fraud rules (${response.status})`);
+          document.getElementById("fraud-rule-note").textContent =
+            `Dataset: ${data.dataset.rows.toLocaleString()} rows. Available fields: ${data.dataset.available_fields.join(", ")}. Missing signals: ${data.dataset.missing_rule_signals.join(", ")}.`;
+          fraudRuleCards.replaceChildren();
+          for (const rule of data.rules) {
+            const article = document.createElement("article");
+            article.className = "fraud-rule-card";
+            const heading = document.createElement("div");
+            heading.className = "fraud-rule-heading";
+            const title = document.createElement("h3");
+            title.textContent = rule.name;
+            const severity = document.createElement("span");
+            severity.className = `rule-severity severity-${rule.severity.toLowerCase()}`;
+            severity.textContent = rule.severity;
+            heading.append(title, severity);
+            const id = document.createElement("code");
+            id.textContent = rule.id;
+            const action = document.createElement("p");
+            action.className = "rule-action";
+            action.textContent = `Configured action: ${rule.action} · Simulation only`;
+            const description = document.createElement("p");
+            description.textContent = rule.description;
+            const conditionTitle = document.createElement("strong");
+            conditionTitle.textContent = "Conditions";
+            const conditions = document.createElement("ul");
+            for (const conditionText of rule.conditions) {
+              const item = document.createElement("li");
+              item.textContent = conditionText;
+              conditions.append(item);
+            }
+            const coverage = document.createElement("p");
+            coverage.className = "rule-coverage";
+            coverage.textContent = rule.dataset_proxy || `Required data missing: ${rule.missing_fields.join(", ")}.`;
+            const reference = rule.reference_metrics;
+            const referenceText = document.createElement("p");
+            referenceText.className = "rule-reference";
+            referenceText.textContent =
+              `Request-supplied reference (not verified): ${reference.interceptions.toLocaleString()} interceptions · $${reference.estimated_savings_usd.toLocaleString()} estimated savings · ${reference.reported_fpr_percent}% FPR.`;
+            article.append(heading, id, action, description, conditionTitle, conditions, coverage, referenceText);
+
+            if (rule.dataset_measurement) {
+              const measurementTitle = document.createElement("strong");
+              measurementTitle.textContent = "Measured against CSV labels (proxy only)";
+              const measurement = document.createElement("p");
+              if (rule.id === "RULE_CARDING_RAPID_MICRO_TX") {
+                measurement.textContent =
+                  `${rule.dataset_measurement.micro_transaction_candidates.toLocaleString()} global-window candidates; ` +
+                  `${rule.dataset_measurement.micro_transaction_fraud_labels.toLocaleString()} had fraud labels; ` +
+                  `proxy false-positive rate ${rule.dataset_measurement.micro_transaction_false_positive_rate_percent}%.`;
+              } else {
+                measurement.textContent =
+                  `CSV average amount $${rule.dataset_measurement.amount_average}; ` +
+                  `2× threshold $${rule.dataset_measurement.amount_threshold}; ` +
+                  `${rule.dataset_measurement.proxy_candidates.toLocaleString()} amount-only candidates; ` +
+                  `${rule.dataset_measurement.proxy_fraud_labels.toLocaleString()} had fraud labels; ` +
+                  `proxy false-positive rate ${rule.dataset_measurement.proxy_false_positive_rate_percent}%.`;
+              }
+              article.append(measurementTitle, measurement);
+            }
+            fraudRuleCards.append(article);
+          }
+          const note = document.createElement("p");
+          note.className = "rule-safety-note";
+          note.textContent = data.classification_note;
+        fraudRuleCards.append(note);
+      }
+      form.addEventListener("submit", async event => {
+        event.preventDefault();
+        message.textContent = "";
+        const payload = {
+          approve_max: Number(form.elements.approve_max.value),
+          challenge_max: Number(form.elements.challenge_max.value)
+        };
+        try {
+          const response = await fetch("/api/rules", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify(payload)
+          });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || `Could not save rules (${response.status})`);
+          await loadRules();
+          message.textContent = "Rules saved and applied to stored replay transactions.";
+        } catch (error) {
+          message.textContent = error.message;
+        }
+      });
+      Promise.all([loadRules(), loadFraudRules()]).catch(error => { message.textContent = error.message; });
+    });
+  </script>
+</body>
+</html>

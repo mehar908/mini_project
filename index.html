@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#172b2a">
+  <title>FraudWatch | Risk operations</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <script defer>
+    document.addEventListener("DOMContentLoaded", () => {
+    const historyTbody = document.getElementById("history-transactions");
+    const historyItems = [];
+    let historyOffset = 0;
+    let historyTotal = 0;
+    let historyLoading = false;
+    let historyReloadPending = false;
+    let historyInitialized = false;
+    let historySearchTimer;
+    let showFlaggedOnly = false;
+    let updating = false;
+    let updateTimer;
+
+    function escapeHtml(value) {
+      return String(value).replace(/[&<>"']/g, character => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;"
+      })[character]);
+    }
+
+    function getFlaggedTransactions() {
+      try {
+        const items = JSON.parse(localStorage.getItem("fraudwatch-flagged-transactions") || "[]");
+        return Array.isArray(items) ? items.filter(item => item && item.id) : [];
+      } catch {
+        return [];
+      }
+    }
+
+    function renderTransactions(items, target, emptyMessage) {
+      if (!items.length) {
+        target.innerHTML = `<tr><td colspan="${target === historyTbody ? 10 : 9}" class="empty">${escapeHtml(emptyMessage)}</td></tr>`;
+        return;
+      }
+
+      const flaggedIds = new Set(getFlaggedTransactions().map(item => item.id));
+      target.innerHTML = items.map(transaction => {
+        const level = transaction.category.toLowerCase();
+        const decision = transaction.decision_status || "Pending";
+        const decisionClass = decision.toLowerCase().replace(/\s+/g, "-");
+        const datasetLabel = transaction.original_dataset_label === null
+          ? transaction.scenario_name ? "Synthetic scenario" : "Synthetic demo"
+          : Number(transaction.original_dataset_label) === 1 ? "Fraud" : "Not fraud";
+        const reasons = [
+          transaction.scenario_name ? `<strong>${escapeHtml(transaction.scenario_name)}</strong><br>` : "",
+          transaction.reasons.map(escapeHtml).join("<br>")
+        ].join("");
+        const ruleEvaluations = (transaction.rule_evaluations || []).map(result =>
+          `<span class="rule-result ${escapeHtml(result.status)}">${escapeHtml(result.rule_id)}: ${escapeHtml(result.status.replace(/_/g, " "))}</span><small>${escapeHtml(result.detail)}</small>`
+        ).join("<br>") || "No rule evaluation stored";
+        const flagged = flaggedIds.has(transaction.id);
+        const investigationControls = target === historyTbody
+          ? `<td class="investigation-cell">
+              <select data-investigation-status aria-label="Investigation status for ${escapeHtml(transaction.id)}">
+                ${["Pending", "In Review", "Reviewed"].map(status =>
+                  `<option${(transaction.investigation_status || "Pending") === status ? " selected" : ""}>${status}</option>`
+                ).join("")}
+              </select>
+              <input data-investigator-notes aria-label="Investigator notes for ${escapeHtml(transaction.id)}" maxlength="2000" value="${escapeHtml(transaction.investigator_notes || "")}" placeholder="Investigator notes">
+              <button class="feed-button" data-save-investigation="${escapeHtml(transaction.id)}" type="button">Save review</button>
+            </td>`
+          : "";
+        return `<tr>
+          <td class="tx-id">${escapeHtml(transaction.id)}</td>
+          <td class="amount">$${Number(transaction.amount).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+          <td>
+            <div class="risk-value">${Number(transaction.risk).toFixed(1)}%</div>
+            <div class="track" role="meter" aria-label="Risk probability" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Number(transaction.risk)}">
+              <div class="fill ${level}" style="width:${Math.min(Math.max(Number(transaction.risk), 0), 100)}%"></div>
+            </div>
+          </td>
+          <td><span class="dataset-label ${datasetLabel === "Fraud" ? "fraud-label" : ""}">${escapeHtml(datasetLabel)}</span></td>
+          <td><span class="badge ${level}">${escapeHtml(transaction.category)}</span></td>
+          <td><span class="decision-badge ${decisionClass}">${escapeHtml(decision)}</span></td>
+          <td class="rule-results">${ruleEvaluations}</td>
+          <td class="reason">${reasons}</td>
+          <td class="action-cell"><button class="flag-button${flagged ? " is-flagged" : ""}" type="button" data-flag-id="${escapeHtml(transaction.id)}" aria-label="${flagged ? "Remove flag from" : "Flag"} ${escapeHtml(transaction.id)} for later" aria-pressed="${flagged}" title="${flagged ? "Remove flag" : "Flag for later"}">${flagged ? "★" : "☆"}</button></td>
+          ${investigationControls}
+        </tr>`;
+      }).join("");
+    }
+
+    function renderHistory() {
+      const items = showFlaggedOnly ? getFlaggedTransactions() : historyItems;
+      const emptyMessage = showFlaggedOnly ? "No flagged transactions yet." : "No previous replayed transactions yet.";
+      const flaggedButton = document.getElementById("show-flagged-history");
+      document.getElementById("show-all-history").setAttribute("aria-pressed", String(!showFlaggedOnly));
+      flaggedButton.setAttribute("aria-pressed", String(showFlaggedOnly));
+      document.getElementById("flagged-total").textContent = getFlaggedTransactions().length;
+      renderTransactions(items, historyTbody, emptyMessage);
+    }
+
+    async function loadHistory(reset = false) {
+      if (historyLoading) {
+        historyReloadPending = historyReloadPending || reset;
+        return;
+      }
+      historyLoading = true;
+      const moreButton = document.getElementById("history-more");
+      moreButton.disabled = true;
+      if (reset) {
+        historyItems.length = 0;
+        historyOffset = 0;
+      }
+
+      try {
+        const params = new URLSearchParams({
+          offset: String(historyOffset),
+          limit: "25",
+          category: document.getElementById("history-risk-filter").value,
+          search: document.getElementById("history-search").value.trim()
+        });
+        const response = await fetch(`/api/history?${params}`, { cache: "no-store" });
+        if (!response.ok) throw new Error(`History request failed (${response.status})`);
+        const data = await response.json();
+        historyItems.push(...data.transactions);
+        historyOffset += data.transactions.length;
+        historyTotal = data.total;
+        renderHistory();
+        document.getElementById("history-status").textContent = showFlaggedOnly
+          ? `${getFlaggedTransactions().length} saved for later`
+          : `Showing ${historyItems.length} of ${historyTotal} replayed transactions`;
+        moreButton.hidden = historyOffset >= historyTotal;
+      } catch (error) {
+        document.getElementById("history-status").textContent = "Could not load transaction history";
+        console.error("History update failed:", error);
+      } finally {
+        moreButton.disabled = false;
+        historyLoading = false;
+        if (historyReloadPending) {
+          historyReloadPending = false;
+          loadHistory(true);
+        }
+      }
+    }
+
+    function toggleFlag(transactionId) {
+      const flagged = getFlaggedTransactions();
+      const existingIndex = flagged.findIndex(item => item.id === transactionId);
+      if (existingIndex >= 0) {
+        flagged.splice(existingIndex, 1);
+      } else {
+        const transaction = [...historyItems, ...getFlaggedTransactions()]
+          .find(item => item.id === transactionId);
+        if (transaction) flagged.push(transaction);
+      }
+      localStorage.setItem("fraudwatch-flagged-transactions", JSON.stringify(flagged));
+      renderHistory();
+    }
+
+    function bindFlagButtons(target) {
+      target.addEventListener("click", event => {
+        const button = event.target.closest("[data-flag-id]");
+        if (button) toggleFlag(button.dataset.flagId);
+      });
+    }
+
+    async function saveInvestigation(button) {
+      const row = button.closest("tr");
+      const status = row.querySelector("[data-investigation-status]").value;
+      const notes = row.querySelector("[data-investigator-notes]").value;
+      button.disabled = true;
+      try {
+        const response = await fetch(
+          `/api/transactions/${encodeURIComponent(button.dataset.saveInvestigation)}/investigation`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ review_status: status, investigator_notes: notes })
+          }
+        );
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || `Review update failed (${response.status})`);
+        document.getElementById("history-status").textContent = "Investigation review saved";
+        await loadHistory(true);
+      } catch (error) {
+        document.getElementById("history-status").textContent = error.message;
+        console.error("Investigation update failed:", error);
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    historyTbody.addEventListener("click", event => {
+      const button = event.target.closest("[data-save-investigation]");
+      if (button) saveInvestigation(button);
+    });
+
+    async function update() {
+      if (updating) return;
+      updating = true;
+      try {
+        const response = await fetch("/api/summary", { cache: "no-store" });
+        if (!response.ok) throw new Error(`Summary request failed (${response.status})`);
+        const data = await response.json();
+
+        document.getElementById("total-count").textContent =
+          Number(data.stats.dataset_transactions).toLocaleString();
+        document.getElementById("fraud-count").textContent = data.stats.fraud_transactions;
+        document.getElementById("legit-count").textContent = data.stats.legit_transactions;
+        document.getElementById("model-accuracy-value").textContent =
+          `${Number(data.stats.model_metrics.accuracy).toFixed(2)}%`;
+        document.getElementById("database-record-count").textContent = data.stats.database_records;
+        document.getElementById("database-fraud-alerts").textContent = data.stats.fraud_alerts;
+        document.getElementById("database-reviewed-count").textContent = data.stats.reviewed_transactions;
+        document.getElementById("database-size").textContent = `${Number(data.stats.database_size_mb).toFixed(3)} MB`;
+        for (const [elementId, countKey] of [
+          ["approved-count", "Approved"],
+          ["in-review-count", "In Review"],
+          ["blocked-count", "Blocked"],
+          ["challenged-count", "Challenged 3DS"],
+          ["min-risk-count", "Min risk"]
+        ]) {
+          document.getElementById(elementId).textContent = data.stats.decision_counts[countKey];
+        }
+        for (const level of ["High", "Medium", "Low"]) {
+          document.getElementById(`${level.toLowerCase()}-count`).textContent = data.counts[level];
+        }
+        const comparisonBody = document.getElementById("model-comparison-body");
+        comparisonBody.replaceChildren();
+        for (const result of data.stats.model_comparison) {
+          if (result.model === "XGBoost") continue;
+          const row = document.createElement("tr");
+          const nameCell = document.createElement("th");
+          nameCell.scope = "row";
+          nameCell.textContent = result.model;
+          row.append(nameCell);
+          if (!result.metrics) {
+            const unavailableCell = document.createElement("td");
+            unavailableCell.colSpan = 9;
+            unavailableCell.textContent = result.unavailable_reason;
+            row.append(unavailableCell);
+          } else {
+            const metrics = result.metrics;
+            const values = [
+              `${metrics.accuracy.toFixed(2)}%`,
+              `${metrics.precision.toFixed(2)}%`,
+              `${metrics.recall.toFixed(2)}%`,
+              `${metrics.f1_score.toFixed(2)}%`,
+              `${metrics.roc_auc.toFixed(2)}%`,
+              `${metrics.pr_auc.toFixed(2)}%`,
+              metrics.confusion_matrix.flat().join(" / "),
+              `${metrics.false_positive_rate.toFixed(2)}%`,
+              `${metrics.false_negative_rate.toFixed(2)}%`
+            ];
+            for (const value of values) {
+              const cell = document.createElement("td");
+              cell.textContent = value;
+              row.append(cell);
+            }
+          }
+          comparisonBody.append(row);
+        }
+
+        if (!historyInitialized) {
+          historyInitialized = true;
+          loadHistory(true);
+        }
+      } catch (error) {
+        console.error("Dashboard update failed:", error);
+      } finally {
+        updating = false;
+      }
+    }
+
+    bindFlagButtons(historyTbody);
+    document.getElementById("show-all-history").addEventListener("click", () => {
+      showFlaggedOnly = false;
+      renderHistory();
+      document.getElementById("history-status").textContent = `Showing ${historyItems.length} of ${historyTotal} replayed transactions`;
+    });
+    document.getElementById("show-flagged-history").addEventListener("click", () => {
+      showFlaggedOnly = true;
+      renderHistory();
+      document.getElementById("history-status").textContent = `${getFlaggedTransactions().length} saved for later`;
+    });
+    document.getElementById("history-refresh").addEventListener("click", () => loadHistory(true));
+    document.getElementById("history-more").addEventListener("click", () => loadHistory());
+    document.getElementById("history-risk-filter").addEventListener("change", () => loadHistory(true));
+    document.getElementById("history-search").addEventListener("input", () => {
+      clearTimeout(historySearchTimer);
+      historySearchTimer = setTimeout(() => loadHistory(true), 250);
+    });
+
+    update();
+    updateTimer = setInterval(update, 2500);
+    window.addEventListener("pagehide", () => clearInterval(updateTimer));
+    });
+  </script>
+</head>
+<body>
+  {% include "_sidebar.html" %}
+
+  <main class="main" id="top">
+    {% include "_workspace_nav.html" %}
+    <header class="topbar" id="overview">
+      <div>
+        <p class="eyebrow">RISK OPERATIONS <span>/</span> TRANSACTION MONITOR</p>
+        <h1>Risk overview</h1>
+        <p class="subheading">Review ensemble risk estimates from Random Forest and Isolation Forest.</p>
+      </div>
+    </header>
+
+    <section class="notice" aria-label="Demo mode notice">
+      <span class="notice-mark" aria-hidden="true">i</span>
+      <p><strong>Demo mode</strong> Risk blends Random Forest (60%) and Isolation Forest (40%). Transactions replay from the supplied dataset plus 15 generated fraud examples; this is not a live payment processor.</p>
+    </section>
+
+    <section class="metrics" aria-label="Risk summary">
+      <article class="metric total-metric">
+        <div class="metric-head"><span>ALL TRANSACTIONS</span><span class="metric-dot"></span></div>
+        <strong id="total-count">0</strong><small>Transactions in the source dataset</small>
+      </article>
+      <article class="metric fraud-metric">
+        <div class="metric-head"><span>FRAUD</span><span class="metric-dot"></span></div>
+        <strong id="fraud-count">0</strong><small>Dataset labels plus demo fraud</small>
+      </article>
+      <article class="metric legit-metric">
+        <div class="metric-head"><span>LEGIT</span><span class="metric-dot"></span></div>
+        <strong id="legit-count">0</strong><small>Legitimate transactions</small>
+      </article>
+      <article class="metric accuracy-metric">
+        <div class="metric-head"><span>ENSEMBLE ACCURACY</span><span class="status-check" aria-hidden="true">✓</span></div>
+        <strong id="model-accuracy-value">0%</strong><small>60% Random Forest · 40% Isolation Forest</small>
+      </article>
+    </section>
+
+    <section class="metrics secondary-metrics" aria-label="Risk-level summary">
+      <article class="metric high-metric">
+        <div class="metric-head"><span>HIGH RISK</span><span class="metric-dot"></span></div>
+        <strong id="high-count">0</strong><small>Score at or above 70%</small>
+      </article>
+      <article class="metric medium-metric">
+        <div class="metric-head"><span>MEDIUM RISK</span><span class="metric-dot"></span></div>
+        <strong id="medium-count">0</strong><small>Score from 30% to 69.9%</small>
+      </article>
+      <article class="metric low-metric">
+        <div class="metric-head"><span>LOW RISK</span><span class="metric-dot"></span></div>
+        <strong id="low-count">0</strong><small>Score below 30%</small>
+      </article>
+      <article class="metric model-metric">
+        <div class="metric-head"><span>MODEL STATUS</span><span class="status-check" aria-hidden="true">✓</span></div>
+        <strong class="model-online">Online</strong><small>RF + Isolation Forest · 60:40 blend</small>
+      </article>
+    </section>
+
+    <section class="metrics outcome-metrics" aria-label="Transaction decision summary">
+      <a class="metric outcome-card approved-metric" href="/live-stream?decision=Approved">
+        <div class="metric-head"><span>APPROVED</span><span class="metric-dot"></span></div>
+        <strong id="approved-count">0</strong><small>Low-risk simulated approvals</small>
+      </a>
+      <a class="metric outcome-card review-metric" href="/live-stream?investigation_status=In%20Review">
+        <div class="metric-head"><span>IN REVIEW</span><span class="metric-dot"></span></div>
+        <strong id="in-review-count">0</strong><small>Manual investigation status</small>
+      </a>
+      <a class="metric outcome-card blocked-metric" href="/live-stream?decision=Blocked">
+        <div class="metric-head"><span>BLOCKED</span><span class="metric-dot"></span></div>
+        <strong id="blocked-count">0</strong><small>High-risk simulated blocks</small>
+      </a>
+      <a class="metric outcome-card challenged-metric" href="/live-stream?decision=Challenged%203DS">
+        <div class="metric-head"><span>CHALLENGED 3DS</span><span class="metric-dot"></span></div>
+        <strong id="challenged-count">0</strong><small>Medium-risk simulated challenges</small>
+      </a>
+      <a class="metric outcome-card min-risk-metric" href="/live-stream?category=Low">
+        <div class="metric-head"><span>MIN RISK</span><span class="metric-dot"></span></div>
+        <strong id="min-risk-count">0</strong><small>Low model-risk transactions</small>
+      </a>
+    </section>
+
+    <section class="panel performance-panel" aria-labelledby="performance-title">
+      <div class="panel-heading table-heading">
+      <div><p class="section-kicker">HOLDOUT EVALUATION</p><h2 id="performance-title">Ensemble performance</h2></div>
+      <div class="report-actions">
+        <span class="chart-unit">Same stratified holdout set · threshold 0.50</span>
+        <a class="feed-button report-link" href="/reports/csv">CSV report</a>
+        <a class="feed-button report-link" href="/reports/pdf">PDF report</a>
+      </div>
+      </div>
+      <div class="table-wrap">
+        <table class="performance-table">
+          <thead><tr>
+          <th scope="col">MODEL</th>
+          <th scope="col">ACCURACY</th>
+          <th scope="col">PRECISION</th>
+          <th scope="col">RECALL</th>
+          <th scope="col">F1-SCORE</th>
+          <th scope="col">ROC-AUC</th>
+          <th scope="col">PR-AUC (AP)</th>
+          <th scope="col">CONFUSION MATRIX<br><small>TN / FP / FN / TP</small></th>
+          <th scope="col">FALSE POSITIVE RATE</th>
+          <th scope="col">FALSE NEGATIVE RATE</th>
+        </tr></thead>
+        <tbody id="model-comparison-body"></tbody>
+      </table>
+      </div>
+      <div class="table-foot"><p>All models use the same held-out test rows. Isolation Forest is fit on normal training rows only. PR-AUC is average precision (AP); confusion counts are ordered TN / FP / FN / TP. Scores exclude synthetic replay demos. Accuracy alone can be misleading for rare fraud.</p></div>
+    </section>
+
+    <section class="panel transactions-panel history-panel">
+      <div class="panel-heading table-heading">
+        <div><p class="section-kicker">SESSION RECORD</p><h2>Transaction history</h2></div>
+        <div class="history-controls">
+          <label class="sr-only" for="history-risk-filter">Filter by risk category</label>
+          <select id="history-risk-filter" class="history-select">
+            <option value="">All risk levels</option>
+            <option value="High">High risk</option>
+            <option value="Medium">Medium risk</option>
+            <option value="Low">Low risk</option>
+          </select>
+          <label class="sr-only" for="history-search">Search transaction ID or amount</label>
+          <input id="history-search" class="history-search" type="search" placeholder="Search ID or amount">
+          <div class="history-filter" role="group" aria-label="History filter">
+            <button id="show-all-history" class="filter-button" type="button" aria-pressed="true">All</button>
+            <button id="show-flagged-history" class="filter-button" type="button" aria-pressed="false">Flagged <span id="flagged-total">0</span></button>
+          </div>
+          <button id="history-refresh" class="feed-button" type="button" title="Refresh history">Refresh</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th scope="col">TRANSACTION</th><th scope="col">AMOUNT</th><th scope="col">RISK PROBABILITY</th>
+            <th scope="col">DATASET LABEL</th><th scope="col">LEVEL</th><th scope="col">DECISION</th><th scope="col">RULE SIGNALS</th><th scope="col">WHY FLAGGED</th><th scope="col">SAVE</th><th scope="col">INVESTIGATION</th>
+          </tr></thead>
+          <tbody id="history-transactions" aria-live="polite">
+            <tr><td colspan="9" class="empty">Loading transaction history…</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="table-foot history-foot">
+        <div class="database-stats" aria-label="Database statistics">
+          <span>Records: <strong id="database-record-count">0</strong></span>
+          <span>Fraud alerts: <strong id="database-fraud-alerts">0</strong></span>
+          <span>Reviewed: <strong id="database-reviewed-count">0</strong></span>
+          <span>Size: <strong id="database-size">0.000 MB</strong></span>
+          <span id="history-status" aria-live="polite">Loading transaction history…</span>
+        </div>
+        <button id="history-more" class="feed-button" type="button" hidden>Load more</button>
+      </div>
+    </section>
+    <footer class="page-footer">Model probabilities are estimates and should be reviewed with appropriate controls.</footer>
+  </main>
+</body>
+</html>

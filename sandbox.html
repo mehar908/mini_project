@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FraudWatch | Sandbox</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  {% include "_sidebar.html" %}
+  <main class="main workspace-content">
+    {% include "_workspace_nav.html" %}
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">SAFE POLICY TESTING</p>
+        <h1>Sandbox</h1>
+        <p class="subheading">Try the active decision rules on a real replay score or a hypothetical score.</p>
+      </div>
+    </header>
+    <section class="notice">
+      <span class="notice-mark" aria-hidden="true">i</span>
+      <p>Sandbox decisions are not written to transaction history and do not call a payment network.</p>
+    </section>
+    <section class="panel workspace-panel">
+      <div class="panel-heading"><div><p class="section-kicker">POLICY SIMULATOR</p><h2>Test a risk score</h2></div></div>
+      <form id="sandbox-form" class="workspace-form">
+        <label>Use a replayed transaction (optional)
+          <select id="sample-transaction">
+            <option value="">Enter a hypothetical score instead</option>
+          </select>
+        </label>
+        <label>Hybrid risk score (%)
+          <input id="sandbox-risk" name="risk" type="number" min="0" max="100" step="0.1" value="15" required>
+        </label>
+        <button class="feed-button primary-button" type="submit">Simulate decision</button>
+      </form>
+      <div id="sandbox-result" class="sandbox-result" role="status" hidden></div>
+      <p id="sandbox-message" class="workspace-message"></p>
+    </section>
+    <section class="panel workspace-panel">
+      <div class="panel-heading"><div><p class="section-kicker">SHARED POLICY</p><h2>Current score bands</h2></div></div>
+      <p id="sandbox-policy" class="methodology-copy">Loading current rules…</p>
+      <a class="feed-button report-link" href="/rules">Configure rules</a>
+    </section>
+  </main>
+  <script>
+    document.addEventListener("DOMContentLoaded", () => {
+      const select = document.getElementById("sample-transaction");
+      const riskInput = document.getElementById("sandbox-risk");
+      const result = document.getElementById("sandbox-result");
+      const message = document.getElementById("sandbox-message");
+      async function loadSamples() {
+        const response = await fetch("/api/history?limit=50", {cache: "no-store"});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `Could not load transactions (${response.status})`);
+        for (const transaction of data.transactions) {
+          const option = document.createElement("option");
+          option.value = transaction.risk;
+          option.textContent = `${transaction.id} · ${transaction.risk.toFixed(1)}% · ${transaction.category}`;
+          select.append(option);
+        }
+      }
+      async function loadPolicy() {
+        const response = await fetch("/api/rules", {cache: "no-store"});
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || `Could not load rules (${response.status})`);
+        document.getElementById("sandbox-policy").textContent =
+          `Below ${data.policy.approve_max}%: Approved · ${data.policy.approve_max}% to below ${data.policy.challenge_max}%: Challenged 3DS · ${data.policy.challenge_max}% and above: Blocked.`;
+      }
+      select.addEventListener("change", () => {
+        if (select.value !== "") riskInput.value = Number(select.value).toFixed(1);
+      });
+      document.getElementById("sandbox-form").addEventListener("submit", async event => {
+        event.preventDefault();
+        result.hidden = true;
+        message.textContent = "";
+        try {
+          const response = await fetch("/api/sandbox", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({risk: Number(riskInput.value)})
+          });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.error || `Simulation failed (${response.status})`);
+          result.hidden = false;
+          result.className = `sandbox-result decision-${data.decision.toLowerCase().replace(/\s+/g, "-")}`;
+          result.textContent = `${data.risk.toFixed(1)}% risk → ${data.decision} (simulation only)`;
+        } catch (error) {
+          message.textContent = error.message;
+        }
+      });
+      Promise.all([loadSamples(), loadPolicy()]).catch(error => { message.textContent = error.message; });
+    });
+  </script>
+</body>
+</html>

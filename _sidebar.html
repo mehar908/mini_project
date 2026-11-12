@@ -1,0 +1,19 @@
+<aside class="sidebar">
+  <a class="brand" href="/" aria-label="FraudWatch overview">
+    <span class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></span>
+    <span>FraudWatch</span>
+  </a>
+  <div class="sidebar-rule"></div>
+  <p class="nav-heading">WORKSPACE</p>
+  <a class="nav-item{% if active_page == 'overview' %} active{% endif %}" href="/">
+    <span class="nav-glyph" aria-hidden="true">◫</span> Overview
+  </a>
+  <a class="nav-item{% if active_page == 'methodology' %} active{% endif %}" href="/methodology">
+    <span class="nav-glyph" aria-hidden="true">i</span> Methodology
+  </a>
+  <div class="sidebar-foot">
+    <span class="foot-label">MODEL</span>
+    <div class="model-state"><i></i> Random forest</div>
+    <p>Dataset replay environment</p>
+  </div>
+</aside>
